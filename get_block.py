@@ -29,7 +29,7 @@ def safe_get(url, params=None, timeout=10):
         return None
 
 # --- Fetch Etherscan TXs ---
-def get_high_gas_txs(min_gas=100, limit=1000):
+def get_high_gas_txs(min_gas=10, limit=10000):
     all_txs, page = [], 1
     while len(all_txs) < limit:
         params = dict(
