@@ -143,7 +143,7 @@ async def listen_mempool():
 def run_dashboard():
     st.title("MEV Bot Detector with Flashbots MEV Bundles")
     # Sidebar settings
-    min_gas     = st.sidebar.number_input("Min Gas (Gwei)", 100)
+    min_gas     = st.sidebar.number_input("Min Gas (Gwei)", 10)
     limit       = st.sidebar.number_input("TX Limit", 500)
     num_blocks  = st.sidebar.number_input("Flashbots Blocks", 10)
 
