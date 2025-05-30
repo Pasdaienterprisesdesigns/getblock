@@ -108,19 +108,23 @@ def run_dashboard():
         st.warning("No transactions fetched.")
         return
 
+    # 1. High-Gas Transactions
     st.subheader("High-Gas Transactions")
     st.dataframe(txs)
 
+    # 2. Sandwich Attacks
     sandwiches = detect_sandwich(txs)
     st.subheader(f"Sandwich Attacks: {len(sandwiches)}")
     if not sandwiches.empty:
         st.dataframe(sandwiches)
         for _, r in sandwiches.iterrows():
             st.markdown(
-                f"• Block {r.block}: tx {r.victim} was sandwich-attacked by {r.front} and {r.back}, "
-                f"bidding {r.front_gas:.1f}, {r.victim_gas:.1f}, {r.back_gas:.1f} Gwei."
+                f"• Block {r.block}: tx {r.victim} was sandwich-attacked: "
+                f"{r.front} → {r.victim} → {r.back} with gas bids "
+                f"{r.front_gas:.1f}, {r.victim_gas:.1f}, {r.back_gas:.1f} Gwei."
             )
 
+    # 3. Anomalous Transactions
     anomalies = detect_anomalies(txs)
     st.subheader(f"Anomalous Transactions: {len(anomalies)}")
     if not anomalies.empty:
@@ -132,6 +136,7 @@ def run_dashboard():
                 f"• Tx {a.tx_hash} bid {a.gasPrice:.1f} Gwei (~{ratio:.1f}× avg), moved {a.value:.4f} ETH."
             )
 
+    # 4. MEV Bot Clusters
     clusters = dbscan_cluster(txs)
     st.subheader("MEV Bot Clusters")
     if clusters.empty:
