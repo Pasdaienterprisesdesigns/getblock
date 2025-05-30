@@ -24,22 +24,25 @@ def safe_get(url, params=None, timeout=10):
         resp = requests.get(url, params=params, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
-    except requests.RequestException as e:
-        st.error(f"API request failed: {e}")
+    except requests.RequestException:
+        # Silently return None; errors handled upstream
+        return None
+    except ValueError:
+        # JSON decode error
         return None
 
 # --- Fetch Etherscan TXs ---
+
 def get_high_gas_txs(min_gas=100, limit=1000):
     all_txs, page = [], 1
     while len(all_txs) < limit:
-        params = {
+        data = safe_get('https://api.etherscan.io/api', {
             'module': 'account', 'action': 'txlist',
             'address': '0x0000000000000000000000000000000000000000',
             'startblock': 0, 'endblock': 99999999,
             'page': page, 'offset': PAGE_SIZE,
             'sort': 'desc', 'apikey': ETHERSCAN_API
-        }
-        data = safe_get('https://api.etherscan.io/api', params)
+        })
         if not data or data.get('status') != '1':
             break
         df_page = pd.DataFrame(data['result'])
@@ -57,6 +60,7 @@ def get_high_gas_txs(min_gas=100, limit=1000):
     return txs[['tx_hash','from_address','to_address','gasPrice','value','blockNumber']]
 
 # --- Fetch Flashbots MEV via GraphQL ---
+
 def fetch_flashbots_mev(num_blocks=10):
     query = '''
     query($n: Int!) {
@@ -71,24 +75,23 @@ def fetch_flashbots_mev(num_blocks=10):
     }
     '''
     try:
-        resp = requests.post(
-            FLASHBOTS_GQL,
-            json={'query': query, 'variables': {'n': num_blocks}},
-            timeout=10
-        )
+        resp = requests.post(FLASHBOTS_GQL,
+                             json={'query': query, 'variables': {'n': num_blocks}},
+                             timeout=10)
         resp.raise_for_status()
-    except requests.RequestException as e:
-        st.error(f"Flashbots query failed: {e}")
+        data = resp.json().get('data', {}).get('blocks', [])
+    except (requests.RequestException, ValueError):
+        # Hide internal errors – return empty DataFrame for display
         return pd.DataFrame()
-    data = resp.json().get('data', {}).get('blocks', [])
+
     records = []
     for blk in data:
-        for tx in blk['transactions']:
+        for tx in blk.get('transactions', []):
             records.append({
-                'blockNumber': blk['number'],
-                'miner': blk['miner'],
-                'tx_hash': tx['transaction_hash'],
-                'profit': int(tx['coinbase_transfer']) / 1e18
+                'blockNumber': blk.get('number'),
+                'miner': blk.get('miner'),
+                'tx_hash': tx.get('transaction_hash'),
+                'profit': int(tx.get('coinbase_transfer', 0)) / 1e18
             })
     return pd.DataFrame(records)
 
@@ -110,14 +113,14 @@ def detect_sandwich(txs):
 
 def detect_anomalies(txs):
     feats = txs[['gasPrice','value']].values
-    scaled = StandardScaler().fit_transform(feats)
-    labels = IsolationForest(contamination=0.01, random_state=42).fit_predict(scaled)
-    return txs[labels == -1]
+    labels = IsolationForest(contamination=0.01, random_state=42)
+    preds = labels.fit_predict(StandardScaler().fit_transform(feats))
+    return txs[preds == -1]
 
 def dbscan_cluster(txs):
     feats = txs[['gasPrice','blockNumber']].values
-    scaled = StandardScaler().fit_transform(feats)
-    lbls = DBSCAN(eps=0.5, min_samples=3).fit_predict(scaled)
+    lbls = DBSCAN(eps=0.5, min_samples=3).fit_predict(
+        StandardScaler().fit_transform(feats))
     txs['cluster'] = lbls
     return txs[txs['cluster'] != -1]
 
@@ -148,7 +151,6 @@ def run_dashboard():
     st.subheader("High-Gas Transactions")
     st.dataframe(txs)
 
-    # Sandwich Attacks
     sandwiches = detect_sandwich(txs)
     st.subheader(f"Sandwich Attacks: {len(sandwiches)}")
     if not sandwiches.empty:
@@ -159,7 +161,6 @@ def run_dashboard():
                 f"bidding {r.front_gas:.1f}, {r.victim_gas:.1f}, and {r.back_gas:.1f} Gwei respectively."
             )
 
-    # Anomalies
     anomalies = detect_anomalies(txs)
     st.subheader(f"Anomalous Transactions: {len(anomalies)}")
     if not anomalies.empty:
@@ -172,29 +173,26 @@ def run_dashboard():
                 f"moved {a.value:.4f} ETH. Unusual high-premium/low-value combo."
             )
 
-    # Flashbots MEV Bundles
     flash = fetch_flashbots_mev(num_blocks)
     st.subheader(f"Flashbots MEV Bundles (last {num_blocks} blocks)")
     if flash.empty:
-        st.info("No Flashbots data available.")
+        st.write("(Flashbots data unavailable)")
     else:
         st.dataframe(flash)
 
-    # MEV Bot Clusters
     clusters = dbscan_cluster(txs)
     st.subheader("MEV Bot Clusters")
     if clusters.empty:
-        st.info("No clusters to plot.")
+        st.write("(No clusters to plot)")
     else:
         st.vega_lite_chart(
             clusters,
-            {
-                'mark':'circle',
-                'encoding':{
-                    'x':{'field':'blockNumber','type':'quantitative'},
-                    'y':{'field':'gasPrice','type':'quantitative'},
-                    'color':{'field':'cluster','type':'nominal'}
-                }
+            {'mark':'circle',
+             'encoding':{
+                 'x':{'field':'blockNumber','type':'quantitative'},
+                 'y':{'field':'gasPrice','type':'quantitative'},
+                 'color':{'field':'cluster','type':'nominal'}
+             }
             },
             use_container_width=True
         )
