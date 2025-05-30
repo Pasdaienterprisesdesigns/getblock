@@ -14,8 +14,8 @@ import streamlit as st
 # --- Config ---
 ETHERSCAN_API = "972W1N6UZ2IC6MXZJ32G7JJJT4UNMRNP6B"
 ALCHEMY_WS_URL = "https://eth-mainnet.g.alchemy.com/v2/RELC1tew5qdPp0NLc82Nw"
-FLASHBOTS_GQL    = "https://datasets.flashbots.net/v1/graphql"
-PAGE_SIZE        = 10000
+FLASHBOTS_GQL  = "https://datasets.flashbots.net/v1/graphql"
+PAGE_SIZE      = 10000
 
 # --- Helpers ---
 
@@ -32,33 +32,32 @@ def safe_get(url, params=None, timeout=10):
 def get_high_gas_txs(min_gas=10, limit=10000):
     all_txs, page = [], 1
     while len(all_txs) < limit:
-        params = dict(
-            module='account', action='txlist',
-            address='0x0000000000000000000000000000000000000000',
-            startblock=0, endblock=99999999,
-            page=page, offset=PAGE_SIZE,
-            sort='desc', apikey=ETHERSCAN_API
-        )
+        params = {
+            'module': 'account', 'action': 'txlist',
+            'address': '0x0000000000000000000000000000000000000000',
+            'startblock': 0, 'endblock': 99999999,
+            'page': page, 'offset': PAGE_SIZE,
+            'sort': 'desc', 'apikey': ETHERSCAN_API
+        }
         data = safe_get('https://api.etherscan.io/api', params)
         if not data or data.get('status') != '1':
             break
-        df = pd.DataFrame(data['result'])
-        df['gasPrice'] = df['gasPrice'].astype(float) / 1e9
-        df = df[df['gasPrice'] > min_gas]
-        all_txs.extend(df.to_dict('records'))
+        df_page = pd.DataFrame(data['result'])
+        # Convert and filter before slicing
+        df_page['gasPrice'] = df_page['gasPrice'].astype(float) / 1e9
+        df_page = df_page[df_page['gasPrice'] > min_gas]
+        all_txs.extend(df_page.to_dict('records'))
         if len(data['result']) < PAGE_SIZE:
             break
         page += 1
     txs = pd.DataFrame(all_txs).head(limit)
-    return (
-        txs.rename(columns={'hash':'tx_hash','from':'from_address','to':'to_address'})
-           .assign(
-               gasPrice=txs['gasPrice'],
-               value=txs['value'].astype(float)/1e18,
-               blockNumber=txs['blockNumber'].astype(int)
-           )
-           [['tx_hash','from_address','to_address','gasPrice','value','blockNumber']]
-    )
+
+    # Ensure numeric types and proper columns
+    txs['gasPrice'] = txs['gasPrice'].astype(float)
+    txs['value'] = txs['value'].astype(float) / 1e18
+    txs['blockNumber'] = txs['blockNumber'].astype(int)
+    txs = txs.rename(columns={'hash':'tx_hash', 'from':'from_address', 'to':'to_address'})
+    return txs[['tx_hash','from_address','to_address','gasPrice','value','blockNumber']]
 
 # --- Fetch Flashbots MEV via GraphQL ---
 def fetch_flashbots_mev(num_blocks=10):
@@ -67,7 +66,6 @@ def fetch_flashbots_mev(num_blocks=10):
       blocks(last: $n) {
         number
         miner
-        timestamp
         transactions {
           transaction_hash
           coinbase_transfer
@@ -97,34 +95,34 @@ def fetch_flashbots_mev(num_blocks=10):
             })
     return pd.DataFrame(records)
 
-# --- MEV Detection ---
+# --- Detection & Clustering ---
 
 def detect_sandwich(txs):
     recs = []
     for i in range(1, len(txs)-1):
-        p, c, n = txs.iloc[i-1], txs.iloc[i], txs.iloc[i+1]
-        if (p['to_address']==n['to_address'] and
-            p['gasPrice']>c['gasPrice']<n['gasPrice'] and
-            p['blockNumber']==c['blockNumber']==n['blockNumber']):
+        prev, curr, nxt = txs.iloc[i-1], txs.iloc[i], txs.iloc[i+1]
+        if (prev['to_address'] == nxt['to_address'] and
+            prev['gasPrice'] > curr['gasPrice'] < nxt['gasPrice'] and
+            prev['blockNumber'] == curr['blockNumber'] == nxt['blockNumber']):
             recs.append({
-                'front': p['tx_hash'], 'victim': c['tx_hash'], 'back': n['tx_hash'],
-                'to': p['to_address'], 'block': p['blockNumber'],
-                'front_gas': p['gasPrice'], 'victim_gas': c['gasPrice'], 'back_gas': n['gasPrice']
+                'front': prev['tx_hash'], 'victim': curr['tx_hash'], 'back': nxt['tx_hash'],
+                'to': prev['to_address'], 'block': prev['blockNumber'],
+                'front_gas': prev['gasPrice'], 'victim_gas': curr['gasPrice'], 'back_gas': nxt['gasPrice']
             })
     return pd.DataFrame(recs)
 
 def detect_anomalies(txs):
     feats = txs[['gasPrice','value']].values
-    Xs = StandardScaler().fit_transform(feats)
-    labels = IsolationForest(contamination=0.01, random_state=42).fit_predict(Xs)
-    return txs[labels==-1]
+    scaled = StandardScaler().fit_transform(feats)
+    labels = IsolationForest(contamination=0.01, random_state=42).fit_predict(scaled)
+    return txs[labels == -1]
 
 def dbscan_cluster(txs):
     feats = txs[['gasPrice','blockNumber']].values
-    Xs = StandardScaler().fit_transform(feats)
-    lbls = DBSCAN(eps=0.5, min_samples=3).fit_predict(Xs)
+    scaled = StandardScaler().fit_transform(feats)
+    lbls = DBSCAN(eps=0.5, min_samples=3).fit_predict(scaled)
     txs['cluster'] = lbls
-    return txs[txs['cluster']!=-1]
+    return txs[txs['cluster'] != -1]
 
 # --- Real-time mempool ---
 async def listen_mempool():
@@ -139,21 +137,22 @@ async def listen_mempool():
                 st.write(f"New pending TX: {msg['params']['result']}")
 
 # --- Streamlit Dashboard ---
-
 def run_dashboard():
-    st.title("MEV Bot Detector with Flashbots MEV Bundles")
-    # Sidebar settings
-    min_gas     = st.sidebar.number_input("Min Gas (Gwei)", 10)
-    limit       = st.sidebar.number_input("TX Limit", 500)
-    num_blocks  = st.sidebar.number_input("Flashbots Blocks", 10)
+    st.title("MEV Bot Detector (Complete & Debugged)")
+    # Sidebar controls
+    min_gas = st.sidebar.number_input("Min Gas (Gwei)", value=10)
+    limit = st.sidebar.number_input("TX Limit", value=500)
+    num_blocks = st.sidebar.number_input("Flashbots Blocks", value=10)
 
-    # 1. High-Gas Etherscan TXs
+    # 1. Fetch
     txs = get_high_gas_txs(min_gas, limit)
     if txs.empty:
         st.warning("No transactions fetched.")
         return
     st.subheader("High-Gas Transactions")
     st.dataframe(txs)
+    st.write("Columns:", txs.columns.tolist())
+    st.write(txs.dtypes)
 
     # 2. Sandwich Attacks
     sandwiches = detect_sandwich(txs)
@@ -163,11 +162,11 @@ def run_dashboard():
         for _, r in sandwiches.iterrows():
             st.markdown(
                 f"• In block **{r.block}**, tx **{r.victim}** was sandwiched: "
-                f"front-runner **{r.front}** paid {r.front_gas:.1f} Gwei, victim paid {r.victim_gas:.1f} Gwei, "
-                f"back-runner **{r.back}** paid {r.back_gas:.1f} Gwei."
+                f"front-runner **{r.front}** bid {r.front_gas:.1f} Gwei, victim bid {r.victim_gas:.1f} Gwei, "
+                f"back-runner **{r.back}** bid {r.back_gas:.1f} Gwei."
             )
 
-    # 3. Anomalous Transactions
+    # 3. Anomalies
     anomalies = detect_anomalies(txs)
     st.subheader(f"Anomalous Transactions: {len(anomalies)}")
     if not anomalies.empty:
@@ -176,28 +175,38 @@ def run_dashboard():
         for _, a in anomalies.iterrows():
             ratio = a.gasPrice / avg_gas if avg_gas else np.nan
             st.markdown(
-                f"• Tx **{a.tx_hash}** bid {a.gasPrice:.1f} Gwei (~{ratio:.1f}× avg {avg_gas:.1f}), "
-                f"but only moved {a.value:.4f} ETH. That's unusual for a high-premium bid."
+                f"• Tx **{a.tx_hash}** bid {a.gasPrice:.1f} Gwei (≈{ratio:.1f}× avg {avg_gas:.1f}). "
+                f"Transferred {a.value:.4f} ETH—this high-premium/low-value combo is anomalous."
             )
 
     # 4. Flashbots MEV Bundles
     flash = fetch_flashbots_mev(num_blocks)
     st.subheader(f"Flashbots MEV Bundles (last {num_blocks} blocks)")
-    if not flash.empty:
+    if flash.empty:
+        st.info("No Flashbots data available.")
+    else:
         st.dataframe(flash)
 
     # 5. MEV Bot Clusters
     clusters = dbscan_cluster(txs)
-    if not clusters.empty:
-        st.subheader("MEV Bot Clusters")
-        st.vega_lite_chart(clusters, {
-            'mark':'circle','encoding':{
-                'x':{'field':'blockNumber','type':'quantitative'},
-                'y':{'field':'gasPrice','type':'quantitative'},
-                'color':{'field':'cluster','type':'nominal'}
-            }
-        })
+    st.subheader("MEV Bot Clusters")
+    if clusters.empty:
+        st.info("No clusters to plot.")
+    else:
+        st.write("Cluster Data Types:", clusters.dtypes)
+        st.vega_lite_chart(
+            clusters,
+            {
+                'mark': 'circle',
+                'encoding': {
+                    'x': {'field': 'blockNumber', 'type': 'quantitative'},
+                    'y': {'field': 'gasPrice', 'type': 'quantitative'},
+                    'color': {'field': 'cluster', 'type': 'nominal'}
+                }
+            },
+            use_container_width=True
+        )
 
 if __name__ == "__main__":
     run_dashboard()
-    # To enable real-time feed: asyncio.run(listen_mempool())
+    # To enable live mempool: asyncio.run(listen_mempool())
