@@ -63,9 +63,13 @@ def detect_sandwich(txs):
             prev['gasPrice'] > curr['gasPrice'] < nxt['gasPrice'] and
             prev['blockNumber'] == curr['blockNumber'] == nxt['blockNumber']):
             recs.append({
-                'front': prev['tx_hash'], 'victim': curr['tx_hash'], 'back': nxt['tx_hash'],
-                'to': prev['to_address'], 'block': prev['blockNumber'],
-                'front_gas': prev['gasPrice'], 'victim_gas': curr['gasPrice'], 'back_gas': nxt['gasPrice']
+                'block': prev['blockNumber'],
+                'victim': curr['tx_hash'],
+                'front': prev['tx_hash'],
+                'back': nxt['tx_hash'],
+                'front_gas': prev['gasPrice'],
+                'victim_gas': curr['gasPrice'],
+                'back_gas': nxt['gasPrice']
             })
     return pd.DataFrame(recs)
 
@@ -84,7 +88,7 @@ def dbscan_cluster(txs):
     txs['cluster'] = lbls
     return txs[txs['cluster'] != -1]
 
-# --- Real-time mempool ---
+# --- Real-time mempool (optional) ---
 async def listen_mempool():
     async with connect(ALCHEMY_WS_URL) as ws:
         await ws.send(json.dumps({
@@ -97,59 +101,72 @@ async def listen_mempool():
                 st.write(f"New pending TX: {msg['params']['result']}")
 
 # --- Streamlit Dashboard ---
-
 def run_dashboard():
+    # Introduction for lay users
     st.title("MEV Bot Detector")
+    st.markdown(
+        """
+        **What is this dashboard?**
+        This tool helps you spot unusual Ethereum transactions and potential MEV (Miner Extractable Value) bots.
+        - **High-Gas Transactions**: shows transactions that paid more gas than normal.
+        - **Sandwich Attacks**: detects when bots sandwich a user’s transaction, forcing them to pay extra.
+        - **Anomalous Transactions**: flags TXs that bid unusually high gas for small transfers.
+        - **MEV Bot Clusters**: groups similar transactions to reveal bot activity patterns.
+
+        **How to use**: adjust the **Min Gas** and **TX Limit** on the sidebar, then explore each section to understand who paid extra gas, why it’s odd, and which bots might be active.
+        """
+    )
     min_gas = st.sidebar.number_input("Min Gas (Gwei)", value=100)
     limit = st.sidebar.number_input("TX Limit", value=500)
 
+    # 1. High-Gas Transactions
     txs = get_high_gas_txs(min_gas, limit)
     if txs.empty:
-        st.warning("No transactions fetched.")
+        st.warning("No transactions fetched. Try increasing the limit or lowering Min Gas.")
         return
-
-    # 1. High-Gas Transactions
-    st.subheader("High-Gas Transactions")
+    st.subheader("1. High-Gas Transactions")
     st.dataframe(txs)
 
     # 2. Sandwich Attacks
     sandwiches = detect_sandwich(txs)
-    st.subheader(f"Sandwich Attacks: {len(sandwiches)}")
-    if not sandwiches.empty:
-        st.dataframe(sandwiches)
+    st.subheader(f"2. Sandwich Attacks Detected: {len(sandwiches)}")
+    if sandwiches.empty:
+        st.write("No sandwich attacks found in the sample.")
+    else:
         for _, r in sandwiches.iterrows():
             st.markdown(
-                f"• Block {r.block}: tx {r.victim} was sandwich-attacked: "
-                f"{r.front} → {r.victim} → {r.back} with gas bids "
-                f"{r.front_gas:.1f}, {r.victim_gas:.1f}, {r.back_gas:.1f} Gwei."
+                f"**In block {r.block}:** a user transaction (**{r.victim}**) got squeezed between two bots. "
+                f"A bot front-ran it (**{r.front}**) at {r.front_gas:.1f} Gwei, then back-ran (**{r.back}**) at {r.back_gas:.1f} Gwei."
             )
 
     # 3. Anomalous Transactions
     anomalies = detect_anomalies(txs)
-    st.subheader(f"Anomalous Transactions: {len(anomalies)}")
-    if not anomalies.empty:
+    st.subheader(f"3. Anomalous Transactions: {len(anomalies)}")
+    if anomalies.empty:
+        st.write("No outlier transactions detected.")
+    else:
         avg_gas = txs['gasPrice'].mean()
-        st.dataframe(anomalies)
         for _, a in anomalies.iterrows():
             ratio = a.gasPrice / avg_gas if avg_gas else np.nan
             st.markdown(
-                f"• Tx {a.tx_hash} bid {a.gasPrice:.1f} Gwei (~{ratio:.1f}× avg), moved {a.value:.4f} ETH."
+                f"• **{a.tx_hash}** bid {a.gasPrice:.1f} Gwei (~{ratio:.1f}× average), moving only {a.value:.4f} ETH. "
+                "This mismatch flags it as unusual."
             )
 
     # 4. MEV Bot Clusters
     clusters = dbscan_cluster(txs)
-    st.subheader("MEV Bot Clusters")
+    st.subheader("4. MEV Bot Clusters")
     if clusters.empty:
-        st.info("No clusters to plot.")
+        st.write("No bot clusters found.")
     else:
         st.vega_lite_chart(
             clusters,
             {
                 'mark': 'circle',
                 'encoding': {
-                    'x': {'field': 'blockNumber', 'type': 'quantitative'},
-                    'y': {'field': 'gasPrice',    'type': 'quantitative'},
-                    'color': {'field': 'cluster', 'type': 'nominal'}
+                    'x': {'field': 'blockNumber', 'type': 'quantitative', 'title': 'Block Number'},
+                    'y': {'field': 'gasPrice',    'type': 'quantitative', 'title': 'Gas Price (Gwei)'},
+                    'color': {'field': 'cluster', 'type': 'nominal',       'title': 'Cluster ID'}
                 }
             },
             use_container_width=True
@@ -157,4 +174,4 @@ def run_dashboard():
 
 if __name__ == "__main__":
     run_dashboard()
-    # To enable mempool listener: asyncio.run(listen_mempool())
+    # To listen to real-time mempool: asyncio.run(listen_mempool())
