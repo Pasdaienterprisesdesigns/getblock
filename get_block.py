@@ -47,11 +47,14 @@ def get_high_gas_txs(min_gas=100, limit=1000):
             break
         page += 1
     txs = pd.DataFrame(all_txs).head(limit)
-    return txs.assign(
-        hash=txs['hash'], gasPrice=txs['gasPrice'],
-        value=txs['value'].astype(float)/1e18,
-        blockNumber=txs['blockNumber'].astype(int),
-        to=txs['to'], from_address=txs['from']
+    # rename hash column to tx_hash for clarity
+    return (
+        txs.rename(columns={'hash': 'tx_hash', 'from': 'from_address', 'to': 'to_address'})
+           .assign(
+               gasPrice=txs['gasPrice'],
+               value=txs['value'].astype(float)/1e18,
+               blockNumber=txs['blockNumber'].astype(int)
+           )[['tx_hash', 'from_address', 'to_address', 'gasPrice', 'value', 'blockNumber']]
     )
 
 # --- 2. Flashbots MEV ---
@@ -74,12 +77,12 @@ def detect_sandwich(txs):
     records = []
     for i in range(1, len(txs)-1):
         prev, curr, nxt = txs.iloc[i-1], txs.iloc[i], txs.iloc[i+1]
-        if (prev['to'] == nxt['to'] and
+        if (prev['to_address'] == nxt['to_address'] and
             prev['gasPrice'] > curr['gasPrice'] < nxt['gasPrice'] and
             prev['blockNumber'] == curr['blockNumber'] == nxt['blockNumber']):
             records.append({
-                'front_hash': prev['hash'], 'victim_hash': curr['hash'], 'back_hash': nxt['hash'],
-                'to': prev['to'], 'block': prev['blockNumber'],
+                'front_hash': prev['tx_hash'], 'victim_hash': curr['tx_hash'], 'back_hash': nxt['tx_hash'],
+                'to_address': prev['to_address'], 'block': prev['blockNumber'],
                 'front_gas': prev['gasPrice'], 'victim_gas': curr['gasPrice'], 'back_gas': nxt['gasPrice']
             })
     return pd.DataFrame(records)
@@ -92,7 +95,15 @@ def detect_anomalies(txs):
     anomalies = txs[labels == -1]
     return anomalies
 
-# --- 5. Real-time mempool ---
+# --- 5. Bot clustering helper ---
+def dbscan_cluster(txs):
+    features = txs[['gasPrice', 'blockNumber']].values
+    X_scaled = StandardScaler().fit_transform(features)
+    clustering = DBSCAN(eps=0.5, min_samples=3).fit(X_scaled)
+    txs['cluster'] = clustering.labels_
+    return txs[txs['cluster'] != -1]
+
+# --- 6. Real-time mempool ---
 async def listen_mempool():
     async with connect(ALCHEMY_WS_URL) as ws:
         await ws.send(json.dumps({
@@ -104,9 +115,9 @@ async def listen_mempool():
             if 'params' in msg:
                 st.write(f"New pending TX: {msg['params']['result']}")
 
-# --- 6. Streamlit Dashboard ---
+# --- 7. Streamlit Dashboard ---
 def run_dashboard():
-    st.title("MEV Bot Detector with Details")
+    st.title("MEV Bot Detector with Exact Hashes")
     min_gas = st.sidebar.number_input("Min Gas (Gwei)", value=100)
     limit = st.sidebar.number_input("TX Limit", value=500)
 
@@ -116,21 +127,18 @@ def run_dashboard():
         return
 
     st.subheader("High-Gas Transactions")
-    st.dataframe(txs[['hash', 'gasPrice', 'value']])
+    st.dataframe(txs)
 
-    # Sandwich attacks with details
     sandwiches = detect_sandwich(txs)
     st.subheader(f"Detected {len(sandwiches)} Sandwich Attacks")
     if not sandwiches.empty:
         st.dataframe(sandwiches)
 
-    # Anomalous transactions with details
     anomalies = detect_anomalies(txs)
     st.subheader(f"Anomalous Transactions: {len(anomalies)}")
     if not anomalies.empty:
-        st.dataframe(anomalies[['hash', 'gasPrice', 'value', 'blockNumber', 'to', 'from_address']])
+        st.dataframe(anomalies[['tx_hash', 'from_address', 'to_address', 'gasPrice', 'value', 'blockNumber']])
 
-    # Bot clusters (unchanged)
     clusters = dbscan_cluster(txs)
     if not clusters.empty:
         st.subheader("MEV Bot Clusters")
