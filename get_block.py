@@ -111,7 +111,7 @@ def run_dashboard():
     """)
 
     # Sidebar input
-    n_blocks = st.sidebar.slider("Number of Recent Blocks to Analyze", 10, 10000, 1000, step=10)
+    n_blocks = st.sidebar.slider("Number of Recent Blocks to Analyze", 10, 100000, 1000, step=10)
 
     # Fetch data
     txs = fetch_recent_block_txs(n_blocks)
