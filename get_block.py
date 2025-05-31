@@ -28,8 +28,14 @@ def safe_get(url, params=None, timeout=10):
 
 # --- Fetch Etherscan TXs ---
 def get_high_gas_txs(min_gas=100, limit=1000):
-    all_txs, page = [], 1
+    all_txs = []
+    page = 1
+    pbar = st.progress(0, text="Fetching transactions...")
+
     while len(all_txs) < limit:
+        percent = min(len(all_txs) / limit, 1.0)
+        pbar.progress(percent, text=f"Fetching transactions... {int(percent*100)}%")
+
         data = safe_get('https://api.etherscan.io/api', {
             'module': 'account', 'action': 'txlist',
             'address': '0x0000000000000000000000000000000000000000',
@@ -37,15 +43,22 @@ def get_high_gas_txs(min_gas=100, limit=1000):
             'page': page, 'offset': PAGE_SIZE,
             'sort': 'desc', 'apikey': ETHERSCAN_API
         })
+
         if not data or data.get('status') != '1':
             break
+
         df_page = pd.DataFrame(data['result'])
         df_page['gasPrice'] = df_page['gasPrice'].astype(float) / 1e9
         df_page = df_page[df_page['gasPrice'] > min_gas]
         all_txs.extend(df_page.to_dict('records'))
+
         if len(data['result']) < PAGE_SIZE:
             break
+
         page += 1
+
+    pbar.empty()
+
     txs = pd.DataFrame(all_txs).head(limit)
     txs['gasPrice'] = txs['gasPrice'].astype(float)
     txs['value'] = txs['value'].astype(float) / 1e18
@@ -100,82 +113,3 @@ async def listen_mempool():
             msg = json.loads(await ws.recv())
             if 'params' in msg:
                 st.write(f"New pending TX: {msg['params']['result']}")
-
-# --- Streamlit Dashboard ---
-def run_dashboard():
-    # Introduction
-    st.title("MEV Bot Detector Dashboard")
-    st.markdown("""
-    This dashboard helps you understand on-chain activity on Ethereum by detecting:
-
-    1. **High Gas Transactions** – These are transactions that paid unusually high fees to get mined quickly. Often used by bots or urgent trades.
-    2. **Sandwich Attacks** – When a bot places a transaction *before* and *after* someone else’s, forcing the victim to pay more while the bot profits.
-    3. **Anomalous Transactions** – These are suspicious transactions where gas fees are unusually high for very low value, hinting at bot behavior.
-    4. **MEV Bot Clusters** – Groups of similar transactions likely created by the same bot using automated scripts.
-
-    👉 Use the sliders on the left to change how many transactions to analyze and the minimum gas price you want to inspect.
-
-    This dashboard is great for:
-    - Traders wanting to understand front-running behavior
-    - Developers learning about on-chain patterns
-    - Curious minds exploring blockchain!
-    """)
-
-    # Sidebar Controls
-    min_gas = st.sidebar.number_input("Minimum Gas (Gwei)", value=100)
-    limit = st.sidebar.number_input("Number of Transactions to Fetch", value=500)
-
-    # Fetch and process transactions
-    txs = get_high_gas_txs(min_gas, limit)
-    if txs.empty:
-        st.warning("No transactions found. Try lowering the gas threshold or increasing the TX limit.")
-        return
-
-    st.subheader("1. High-Gas Transactions")
-    st.dataframe(txs)
-
-    st.subheader("2. Detected Sandwich Attacks")
-    sandwiches = detect_sandwich(txs)
-    if sandwiches.empty:
-        st.info("No sandwich attacks found in this dataset.")
-    else:
-        st.dataframe(sandwiches)
-        for _, r in sandwiches.iterrows():
-            st.markdown(
-                f"\n**Block {r.block}**\n\nA sandwich attack was detected.\n\n- The **victim transaction** `{r.victim_hash}` was squeezed between two bot transactions.\n- The **front-runner bot** `{r.front_hash}` bid {r.front_gas:.1f} Gwei.\n- The **victim** bid {r.victim_gas:.1f} Gwei.\n- The **back-runner bot** `{r.back_hash}` bid {r.back_gas:.1f} Gwei."
-            )
-
-    st.subheader("3. Anomalous Transactions")
-    anomalies = detect_anomalies(txs)
-    if anomalies.empty:
-        st.info("No anomalous transactions found.")
-    else:
-        st.dataframe(anomalies)
-        avg_gas = txs['gasPrice'].mean()
-        for _, a in anomalies.iterrows():
-            ratio = a.gasPrice / avg_gas if avg_gas else np.nan
-            st.markdown(
-                f"\n• Transaction `{a.tx_hash}` paid **{a.gasPrice:.1f} Gwei** gas (~{ratio:.1f}× average) to move only **{a.value:.4f} ETH**.\n\nThis could mean urgency, bot activity, or inefficiency."
-            )
-
-    st.subheader("4. MEV Bot Clusters")
-    clusters = dbscan_cluster(txs)
-    if clusters.empty:
-        st.info("No clusters detected.")
-    else:
-        st.vega_lite_chart(
-            clusters,
-            {
-                'mark': 'circle',
-                'encoding': {
-                    'x': {'field': 'blockNumber', 'type': 'quantitative', 'title': 'Block'},
-                    'y': {'field': 'gasPrice',    'type': 'quantitative', 'title': 'Gas (Gwei)'},
-                    'color': {'field': 'cluster', 'type': 'nominal', 'title': 'Cluster ID'}
-                }
-            },
-            use_container_width=True
-        )
-
-if __name__ == "__main__":
-    run_dashboard()
-    # asyncio.run(listen_mempool())
