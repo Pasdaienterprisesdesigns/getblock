@@ -15,8 +15,8 @@ from datetime import datetime
 
 # --- Config ---
 ETHERSCAN_API = "972W1N6UZ2IC6MXZJ32G7JJJT4UNMRNP6B"
-ALCHEMY_WS_URL = "https://eth-mainnet.g.alchemy.com/v2/RELC1tew5qdPp0NLc82Nw"
-ALCHEMY_WS_URL = "wss://eth-mainnet.g.alchemy.com/v2/v2/RELC1tew5qdPp0NLc82Nw"
+ALCHEMY_HTTP_URL = 'https://eth-mainnet.g.alchemy.com/v2/RELC1tew5qdPp0NLc82Nw'
+ALCHEMY_WS_URL = 'wss://eth-mainnet.g.alchemy.com/v2/RELC1tew5qdPp0NLc82Nw'
 PAGE_SIZE      = 10000
 w3 = Web3(Web3.HTTPProvider(ALCHEMY_HTTP_URL))
 
