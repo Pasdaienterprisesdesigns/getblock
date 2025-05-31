@@ -14,8 +14,8 @@ from web3 import Web3
 from datetime import datetime
 
 # --- Config ---
-ALCHEMY_HTTP_URL = 'https://eth-mainnet.g.alchemy.com/v2/RELC1tew5qdPp0NLc82Nw'
-ALCHEMY_WS_URL = 'wss://eth-mainnet.g.alchemy.com/v2/RELC1tew5qdPp0NLc82Nw'
+ALCHEMY_HTTP_URL = "https://eth-mainnet.g.alchemy.com/v2/RELC1tew5qdPp0NLc82Nw"
+ALCHEMY_WS_URL = "wss://eth-mainnet.g.alchemy.com/v2/RELC1tew5qdPp0NLc82Nw"
 w3 = Web3(Web3.HTTPProvider(ALCHEMY_HTTP_URL))
 
 # --- Fetch latest block transactions ---
