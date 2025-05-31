@@ -10,64 +10,52 @@ from websockets import connect
 import asyncio
 import json
 import streamlit as st
+from web3 import Web3
+from datetime import datetime
 
 # --- Config ---
 ETHERSCAN_API = "972W1N6UZ2IC6MXZJ32G7JJJT4UNMRNP6B"
 ALCHEMY_WS_URL = "https://eth-mainnet.g.alchemy.com/v2/RELC1tew5qdPp0NLc82Nw"
+ALCHEMY_WS_URL = "wss://eth-mainnet.g.alchemy.com/v2/v2/RELC1tew5qdPp0NLc82Nw"
 PAGE_SIZE      = 10000
+w3 = Web3(Web3.HTTPProvider(ALCHEMY_HTTP_URL))
 
 # --- Helpers ---
-
-def safe_get(url, params=None, timeout=10):
-    try:
-        resp = requests.get(url, params=params, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
-    except (requests.RequestException, ValueError):
-        return None
-
-# --- Fetch Etherscan TXs ---
-def get_high_gas_txs(min_gas=100, limit=1000):
+def fetch_recent_block_txs(n_blocks=10000):
+    latest = w3.eth.block_number
     all_txs = []
-    page = 1
-    pbar = st.progress(0, text="Fetching transactions...")
+    timestamps = []
+    pbar = st.progress(0, text="Fetching blocks...")
 
-    while len(all_txs) < limit:
-        percent = min(len(all_txs) / limit, 1.0)
-        pbar.progress(percent, text=f"Fetching transactions... {int(percent*100)}%")
+    for i, block_num in enumerate(range(latest, latest - n_blocks, -1)):
+        try:
+            block = w3.eth.get_block(block_num, full_transactions=True)
+            timestamps.append(block.timestamp)
+            for tx in block.transactions:
+                all_txs.append({
+                    'tx_hash': tx.hash.hex(),
+                    'from_address': tx['from'],
+                    'to_address': tx.to,
+                    'gasPrice': tx.gasPrice / 1e9,
+                    'value': tx.value / 1e18,
+                    'blockNumber': tx.blockNumber
+                })
+        except Exception:
+            continue
 
-        data = safe_get('https://api.etherscan.io/api', {
-            'module': 'account', 'action': 'txlist',
-            'address': '0x0000000000000000000000000000000000000000',
-            'startblock': 0, 'endblock': 99999999,
-            'page': page, 'offset': PAGE_SIZE,
-            'sort': 'desc', 'apikey': ETHERSCAN_API
-        })
-
-        if not data or data.get('status') != '1':
-            break
-
-        df_page = pd.DataFrame(data['result'])
-        df_page['gasPrice'] = df_page['gasPrice'].astype(float) / 1e9
-        df_page = df_page[df_page['gasPrice'] > min_gas]
-        all_txs.extend(df_page.to_dict('records'))
-
-        if len(data['result']) < PAGE_SIZE:
-            break
-
-        page += 1
+        percent = min(i / n_blocks, 1.0)
+        pbar.progress(percent, text=f"Fetching blocks... {int(percent*100)}%")
 
     pbar.empty()
 
-    txs = pd.DataFrame(all_txs).head(limit)
-    txs['gasPrice'] = txs['gasPrice'].astype(float)
-    txs['value'] = txs['value'].astype(float) / 1e18
-    txs['blockNumber'] = txs['blockNumber'].astype(int)
-    txs = txs.rename(columns={'hash':'tx_hash', 'from':'from_address', 'to':'to_address'})
-    return txs[['tx_hash','from_address','to_address','gasPrice','value','blockNumber']]
+    if timestamps:
+        min_time = datetime.utcfromtimestamp(min(timestamps)).strftime('%Y-%m-%d %H:%M:%S')
+        max_time = datetime.utcfromtimestamp(max(timestamps)).strftime('%Y-%m-%d %H:%M:%S')
+        st.info(f"Time Range Covered: {min_time} UTC to {max_time} UTC")
+
+    return pd.DataFrame(all_txs)
 
 # --- Detection & Clustering ---
-
 def detect_sandwich(txs):
     recs = []
     for i in range(1, len(txs)-1):
